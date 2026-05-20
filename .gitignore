@@ -1,7 +1,5 @@
 node_modules/
 database.json
 EmailSender.js
-package-lock.json
-package.json
 seedProducts.js
 seedProducts.json
