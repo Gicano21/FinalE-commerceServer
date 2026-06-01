@@ -1,119 +1,13 @@
-//EmailSender.js
 require('dotenv').config();
 const express = require("express");
 const nodemailer = require("nodemailer");
 const axios = require("axios");
-const mysql = require("mysql2/promise");
-const fs = require("fs");
-const path = require("path");
 
 const app = express();
 app.use(express.json());
 const API_URL = process.env.API_URL || "http://localhost:3000";
 
-// --- Database Setup (MySQL) ---
-const pool = mysql.createPool({
-  host: process.env.DB_HOST || '127.0.0.1',
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || '',
-  database: process.env.DB_NAME || 'techstore',
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0
-});
-
-//Initialize Products Table, Create products table if it doesn't exist of cource the demo products
-async function initializeProductsTable() {
-  try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS products (
-        id INT PRIMARY KEY,
-        name VARCHAR(255) NOT NULL,
-        price DECIMAL(10, 2) NOT NULL,
-        originalPrice DECIMAL(10, 2),
-        image LONGTEXT NOT NULL,
-        category VARCHAR(100) NOT NULL,
-        description LONGTEXT NOT NULL,
-        rating DECIMAL(3, 1) NOT NULL,
-        reviews INT NOT NULL,
-        inStock INT NOT NULL,
-        featured BOOLEAN DEFAULT false
-      )
-    `);
-
-    // Check if products table is empty
-    const [rows] = await pool.query('SELECT COUNT(*) as count FROM products');
-    
-    if (rows[0].count === 0) {
-      // Load seed data from seedProducts.json
-      const seedPath = path.join(__dirname, 'seedProducts.json');
-      const seedData = JSON.parse(fs.readFileSync(seedPath, 'utf-8'));
-      
-      // Insert seed products
-      for (const product of seedData) {
-        await pool.query(
-          `INSERT INTO products (id, name, price, originalPrice, image, category, description, rating, reviews, inStock, featured)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            product.id,
-            product.name,
-            product.price,
-            product.originalPrice || null,
-            product.image,
-            product.category,
-            product.description,
-            product.rating,
-            product.reviews,
-            typeof product.inStock === 'number'
-              ? product.inStock
-              : product.inStock
-              ? 1
-              : 0,
-            product.featured ? 1 : 0
-          ]
-        );
-      }
-      console.log('Products table seeded with', seedData.length, 'products');
-    } else {
-      console.log('Products table already seeded');
-    }
-  } catch (error) {
-    console.error("Error initializing products table:", error);
-  }
-}
-
-// Initialize products table on startup
-initializeProductsTable();
-
-// Helper function to safely parse the JSON cart from MySQL
-function formatUser(row) {
-  if (!row) return null;
-  return {
-    ...row,
-    // Ensure the cart is returned as an array, not a string
-    cart: typeof row.cart === 'string' ? JSON.parse(row.cart) : (row.cart || [])
-  };
-}
-
-// Helper function to format product rows from MySQL
-function formatProduct(row) {
-  if (!row) return null;
-  return {
-    id: row.id,
-    name: row.name,
-    price: parseFloat(row.price),
-    originalPrice: row.originalPrice ? parseFloat(row.originalPrice) : undefined,
-    image: row.image,
-    category: row.category,
-    description: row.description,
-    rating: parseFloat(row.rating),
-    reviews: row.reviews,
-    inStock: Number(row.inStock || 0),
-    featured: row.featured === 1 || row.featured === true
-  };
-}
-
-// --- Email Setup ---
+// --- Email Configuration Setup ---
 const transporter = nodemailer.createTransport({
   service: "gmail",
   auth: {
@@ -123,6 +17,7 @@ const transporter = nodemailer.createTransport({
   tls: { rejectUnauthorized: false }
 });
 
+// --- Action Email Functions ---
 async function sendCode(data) {
   try {
     await transporter.sendMail({
@@ -130,7 +25,7 @@ async function sendCode(data) {
       to: data.Email,
       subject: "Verify your email",
       html: `
-        <body style="margin: 0; padding: 0; background-color: #f4f4f7; font-family: 'Segoe UI', Helvetica, Arial, sans-serif;">
+<body style="margin: 0; padding: 0; background-color: #f4f4f7; font-family: 'Segoe UI', Helvetica, Arial, sans-serif;">
   <table border="0" cellpadding="0" cellspacing="0" width="100%">
     <tr>
       <td align="center" style="padding: 40px 0;">
@@ -187,7 +82,7 @@ async function sendFeedBack(data) {
       to: "yawningeverytime@gmail.com",
       subject: data.Subject,
       html: `
-        <body style="margin: 0; padding: 0; background-color: #f4f4f7; font-family: 'Segoe UI', Helvetica, Arial, sans-serif;">
+<body style="margin: 0; padding: 0; background-color: #f4f4f7; font-family: 'Segoe UI', Helvetica, Arial, sans-serif;">
   <table border="0" cellpadding="0" cellspacing="0" width="100%">
     <tr>
       <td align="center" style="padding: 40px 0;">
@@ -228,235 +123,12 @@ async function sendFeedBack(data) {
   }
 }
 
-// --- Process Database Tasks (Now Async for MySQL) ---
-async function processDbTask(task) {
-  const { action, payload, params, query } = task;
-
-  try {
-    switch (action) {
-      case 'GET_USERS': {
-        const [rows] = await pool.query('SELECT * FROM users');
-        return { status: 200, data: rows.map(formatUser) };
-      }
-
-      case 'SEARCH_USERS': {
-        const searchTerm = `%${query.q}%`;
-        const [rows] = await pool.query(
-          'SELECT * FROM users WHERE username LIKE ? OR email LIKE ?',
-          [searchTerm, searchTerm]
-        );
-        return { status: 200, data: rows.map(formatUser) };
-      }
-
-      case 'CREATE_USER': {
-        if (!payload.username || !payload.email || !payload.password) {
-          return { status: 400, data: { error: 'Missing fields' } };
-        }
-        
-        // Check if user exists
-        const [existing] = await pool.query(
-          'SELECT id FROM users WHERE email = ? OR username = ?',
-          [payload.email, payload.username]
-        );
-        if (existing.length > 0) return { status: 400, data: { error: 'User exists' } };
-        
-        const id = `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-        const createdAt = new Date().toISOString();
-        const emptyCart = JSON.stringify([]);
-
-        await pool.query(
-          'INSERT INTO users (id, username, email, password, createdAt, cart) VALUES (?, ?, ?, ?, ?, ?)',
-          [id, payload.username, payload.email, payload.password, createdAt, emptyCart]
-        );
-
-        return { 
-          status: 201, 
-          data: { id, username: payload.username, email: payload.email, password: payload.password, createdAt, cart: [] } 
-        };
-      }
-
-      case 'AUTH_USER': {
-        const [rows] = await pool.query(
-          'SELECT * FROM users WHERE email = ? AND password = ?',
-          [payload.email, payload.password]
-        );
-        return rows.length > 0 
-          ? { status: 200, data: formatUser(rows[0]) } 
-          : { status: 401, data: { error: 'Invalid credentials' } };
-      }
-
-      case 'GET_USER_BY_ID': {
-        const [rows] = await pool.query('SELECT * FROM users WHERE id = ?', [params.id]);
-        return rows.length > 0 
-          ? { status: 200, data: formatUser(rows[0]) } 
-          : { status: 404, data: { error: 'Not found' } };
-      }
-
-      case 'UPDATE_USER': {
-        const keys = Object.keys(payload);
-        if (keys.length === 0) return { status: 400, data: { error: 'No fields to update' } };
-
-        const setClause = keys.map(k => `${k} = ?`).join(', ');
-        const values = keys.map(k => payload[k]);
-        
-        const [result] = await pool.query(`UPDATE users SET ${setClause} WHERE id = ?`, [...values, params.id]);
-        
-        if (result.affectedRows === 0) return { status: 404, data: { error: 'Not found' } };
-        
-        const [updatedRows] = await pool.query('SELECT * FROM users WHERE id = ?', [params.id]);
-        return { status: 200, data: formatUser(updatedRows[0]) };
-      }
-
-      case 'DELETE_USER': {
-        const [result] = await pool.query('DELETE FROM users WHERE id = ?', [params.id]);
-        if (result.affectedRows === 0) return { status: 404, data: { error: 'Not found' } };
-        return { status: 200, data: { message: 'Deleted' } };
-      }
-
-      // --- Cart Logic ---
-      case 'ADD_CART_ITEM': {
-        const [rows] = await pool.query('SELECT cart FROM users WHERE id = ?', [params.id]);
-        if (rows.length === 0) return { status: 404, data: { error: 'Not found' } };
-
-        let cart = formatUser(rows[0]).cart;
-        const existingItem = cart.find(item => item.id === payload.id);
-        
-        if (existingItem) existingItem.quantity += payload.quantity;
-        else cart.push(payload);
-        
-        await pool.query('UPDATE users SET cart = ? WHERE id = ?', [JSON.stringify(cart), params.id]);
-        return { status: 200, data: cart };
-      }
-
-      case 'UPDATE_CART_ITEM': {
-        const [uRows] = await pool.query('SELECT cart FROM users WHERE id = ?', [params.id]);
-        if (uRows.length === 0) return { status: 404, data: { error: 'Not found' } };
-
-        let uCart = formatUser(uRows[0]).cart;
-        const uItem = uCart.find(item => item.id === parseInt(params.itemId));
-        if (!uItem) return { status: 404, data: { error: 'Item not found' } };
-        
-        Object.assign(uItem, payload);
-        await pool.query('UPDATE users SET cart = ? WHERE id = ?', [JSON.stringify(uCart), params.id]);
-        return { status: 200, data: uCart };
-      }
-
-      case 'REMOVE_CART_ITEM': {
-        const [rRows] = await pool.query('SELECT cart FROM users WHERE id = ?', [params.id]);
-        if (rRows.length === 0) return { status: 404, data: { error: 'Not found' } };
-
-        let rCart = formatUser(rRows[0]).cart;
-        rCart = rCart.filter(item => item.id !== parseInt(params.itemId));
-        
-        await pool.query('UPDATE users SET cart = ? WHERE id = ?', [JSON.stringify(rCart), params.id]);
-        return { status: 200, data: rCart };
-      }
-
-      case 'CLEAR_CART': {
-        const [result] = await pool.query('UPDATE users SET cart = ? WHERE id = ?', [JSON.stringify([]), params.id]);
-        if (result.affectedRows === 0) return { status: 404, data: { error: 'Not found' } };
-        return { status: 200, data: [] };
-      }
-
-      case 'CHECKOUT': {
-        const items = payload.items;
-        if (!Array.isArray(items) || items.length === 0) {
-          return { status: 400, data: { error: 'No items provided for checkout' } };
-        }
-
-        const [userRows] = await pool.query('SELECT cart FROM users WHERE id = ?', [params.id]);
-        if (userRows.length === 0) {
-          return { status: 404, data: { error: 'User not found' } };
-        }
-
-        const cart = formatUser(userRows[0]).cart;
-        if (!Array.isArray(cart) || cart.length === 0) {
-          return { status: 400, data: { error: 'Cart is empty' } };
-        }
-
-        const productIds = items.map((item) => item.id);
-        const [productRows] = await pool.query(
-          `SELECT * FROM products WHERE id IN (${productIds.map(() => '?').join(',')})`,
-          productIds
-        );
-
-        const availableProducts = productRows.map(formatProduct);
-        const productMap = new Map(availableProducts.map((product) => [product?.id, product]));
-        const missingProductId = productIds.find(
-          (id) => !productMap.has(id)
-        );
-
-        if (missingProductId !== undefined) {
-          return {
-            status: 404,
-            data: {
-              error: `Product with ID ${missingProductId} could not be found. Please update your cart before checkout.`,
-            },
-          };
-        }
-
-        const unavailable = items.find((item) => {
-          const product = productMap.get(item.id);
-          return !product || product.inStock <= 0 || product.inStock < item.quantity;
-        });
-
-        if (unavailable) {
-          const product = productMap.get(unavailable.id);
-          return {
-            status: 409,
-            data: {
-              error: `Product ${product?.name || 'unknown'} does not have enough stock. Please reduce quantity or remove it before checkout.`,
-            },
-          };
-        }
-
-        // Decrement purchased item stock quantity without going negative.
-        for (const item of items) {
-          await pool.query(
-            'UPDATE products SET inStock = GREATEST(inStock - ?, 0) WHERE id = ?',
-            [item.quantity, item.id]
-          );
-        }
-
-        await pool.query('UPDATE users SET cart = ? WHERE id = ?', [JSON.stringify([]), params.id]);
-        return { status: 200, data: { message: 'Checkout complete', purchasedItems: items } };
-      }
-
-      // --- Product Logic ---
-      case 'GET_PRODUCTS': {
-        const [rows] = await pool.query('SELECT * FROM products ORDER BY id ASC');
-        return { status: 200, data: rows.map(formatProduct) };
-      }
-
-      case 'GET_PRODUCT_BY_ID': {
-        const [rows] = await pool.query('SELECT * FROM products WHERE id = ?', [params.id]);
-        return rows.length > 0
-          ? { status: 200, data: formatProduct(rows[0]) }
-          : { status: 404, data: { error: 'Product not found' } };
-      }
-
-      case 'CLEAR_DB': {
-        await pool.query('TRUNCATE TABLE users');
-        return { status: 200, data: { message: 'Database cleared' } };
-      }
-
-      default:
-        return { status: 400, data: { error: "Unknown DB action" } };
-    }
-  } catch (error) {
-    console.error("MySQL Processing Error:", error);
-    return { status: 500, data: { error: "MySQL DB Processing Error", details: error.message } };
-  }
-}
-
 // --- Polling Logic ---
 async function sync() {
   try {
-    // 1. Ask CloudServer for pending tasks
     const response = await axios.get(`${API_URL}/worker/poll`);
-    const { emails, databaseTasks } = response.data;
+    const { emails } = response.data;
     
-    // 2. Send Emails
     if (emails && emails.length > 0) {
       for (const email of emails) {
         if (email.type === "code") {
@@ -466,36 +138,17 @@ async function sync() {
         }
       }
     }
-    
-    // 3. Process Database Tasks
-    if (databaseTasks && databaseTasks.length > 0) {
-      for (const task of databaseTasks) {
-        // Await added here so the SQL query finishes before answering the cloud server
-        const result = await processDbTask(task);
-        
-        // Send the answer back to CloudServer
-        await axios.post(`${API_URL}/worker/resolve`, {
-          jobId: task.id,
-          status: result.status,
-          data: result.data
-        });
-        console.log(`Processed DB Task: ${task.action}`);
-      }
-    }
-
   } catch (e) {
-    // Suppress heavy console logging if the render server is asleep
     if (e.code !== 'ECONNREFUSED') {
-       console.log("Waiting for CodeMaker (Cloud Server)... retrying.");
+       console.log("Email Worker: Waiting for CodeMaker (Cloud Server)... retrying.");
     }
   }
 }
 
-// Poll every 1 second for fast UI responses
 setInterval(sync, 1000);
 
-const WORKER_PORT = process.env.WORKER_PORT || 3001;
-app.listen(WORKER_PORT, () => {
-  console.log(`Worker (MySQL) running on port ${WORKER_PORT}`);
+const EMAIL_WORKER_PORT = process.env.EMAIL_WORKER_PORT || 3002;
+app.listen(EMAIL_WORKER_PORT, () => {
+  console.log(`Worker (Email Engine) running on port ${EMAIL_WORKER_PORT}`);
   sync();
 });
